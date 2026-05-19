@@ -5,20 +5,26 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 const config = {
-  apiUrl: process.env.API_URL || "",
-  apiMethod: (process.env.API_METHOD || "POST").toUpperCase(),
-  apiAuthHeader: process.env.API_AUTH_HEADER || "",
-  apiAuthValue: process.env.API_AUTH_VALUE || "",
+  apiUrl: process.env.API_URL || "https://portal.scaleupdevagency.com/update-sheet/add-entry",
+  nextAction: process.env.NEXT_ACTION || "",
+  cookies: process.env.COOKIES || "",
+  profileId: process.env.PROFILE_ID || "",
+  clientName: process.env.CLIENT_NAME || "",
+  orderId: process.env.ORDER_ID || "",
+  updateTo: process.env.UPDATE_TO || "INBOX_PAGE_UPDATE",
   authorName: process.env.AUTHOR_NAME || "",
   authorRole: process.env.AUTHOR_ROLE || "",
 };
 
-let extraHeaders: Record<string, string> = {};
-try {
-  if (process.env.API_EXTRA_HEADERS) {
-    extraHeaders = JSON.parse(process.env.API_EXTRA_HEADERS);
-  }
-} catch { /* ignore invalid json */ }
+function textToHtml(text: string): string {
+  const escaped = text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+  const withBreaks = escaped.replace(/\n/g, "<br>");
+  return `<p>${withBreaks}</p>`;
+}
 
 function formatUpdate(params: {
   date: string;
@@ -38,8 +44,6 @@ function formatUpdate(params: {
 
   const today = params.date || new Date().toISOString().split("T")[0];
 
-  lines.push(`Subject: Work Update — ${today}`);
-  lines.push("");
   lines.push(`Hi ${recipient},`);
   lines.push("");
   lines.push("Please find below a summary of the work completed and current status of ongoing tasks.");
@@ -95,76 +99,92 @@ server.tool(
     })).describe("List of tasks with structured details"),
     general_notes: z.string().optional().describe("Any additional context or notes"),
     closing: z.string().optional().describe("Custom closing message"),
+    as_html: z.boolean().optional().describe("Return as HTML instead of plain text"),
   },
   async (params) => {
     const formatted = formatUpdate(params);
+    const output = params.as_html ? textToHtml(formatted) : formatted;
     return {
-      content: [{ type: "text" as const, text: formatted }],
+      content: [{ type: "text" as const, text: output }],
     };
   },
 );
 
+async function publishToPortal(params: {
+  message: string;
+  clientName?: string;
+  orderId?: string;
+  profileId?: string;
+  updateTo?: string;
+  attachments?: string;
+  commentFromOperation?: string;
+  commentFromSales?: string;
+}) {
+  if (!config.nextAction) {
+    return { ok: false, text: "Error: NEXT_ACTION is not configured. Set it in the server env vars." };
+  }
+  if (!config.cookies) {
+    return { ok: false, text: "Error: COOKIES is not configured. Set it in the server env vars." };
+  }
+
+  const payload = [{
+    profileId: params.profileId || config.profileId,
+    clientName: params.clientName || config.clientName,
+    orderId: params.orderId || config.orderId,
+    attachments: params.attachments || "$undefined",
+    commentFromOperation: params.commentFromOperation || "$undefined",
+    commentFromSales: params.commentFromSales || "$undefined",
+    updateTo: params.updateTo || config.updateTo,
+    message: params.message,
+  }];
+
+  try {
+    const response = await fetch(config.apiUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "text/plain;charset=UTF-8",
+        "Next-Action": config.nextAction,
+        "Cookie": config.cookies,
+        "Origin": new URL(config.apiUrl).origin,
+        "Referer": config.apiUrl,
+        "Accept": "text/x-component",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const responseText = await response.text();
+    if (!response.ok) {
+      return { ok: false, text: `Portal request failed (${response.status}): ${responseText}` };
+    }
+
+    return { ok: true, text: `Update published to portal.\nStatus: ${response.status}\nResponse: ${responseText}` };
+  } catch (error) {
+    return { ok: false, text: `Error publishing: ${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
 server.tool(
   "publish_update",
-  "Publish a formatted work update to the configured website API",
+  "Publish HTML content to the portal as a work update entry",
   {
-    content: z.string().describe("The formatted update content to publish"),
-    title: z.string().optional().describe("Optional title for the update entry"),
+    message: z.string().describe("HTML content for the update message body"),
+    clientName: z.string().optional().describe("Override client name"),
+    orderId: z.string().optional().describe("Override order/project ID"),
+    profileId: z.string().optional().describe("Override profile ID"),
+    updateTo: z.string().optional().describe("Update type (defaults to INBOX_PAGE_UPDATE)"),
   },
   async (params) => {
-    if (!config.apiUrl) {
-      return {
-        content: [{ type: "text" as const, text: "Error: API_URL is not configured. Set environment variables before starting the server." }],
-        isError: true,
-      };
-    }
-
-    const now = new Date().toISOString();
-    const body = {
-      title: params.title || `Work Update — ${now.split("T")[0]}`,
-      content: params.content,
-      author: config.authorName || undefined,
-      createdAt: now,
+    const result = await publishToPortal(params);
+    return {
+      content: [{ type: "text" as const, text: result.text }],
+      isError: !result.ok,
     };
-
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      ...extraHeaders,
-    };
-    if (config.apiAuthHeader && config.apiAuthValue) {
-      headers[config.apiAuthHeader] = config.apiAuthValue;
-    }
-
-    try {
-      const response = await fetch(config.apiUrl, {
-        method: config.apiMethod,
-        headers,
-        body: JSON.stringify(body),
-      });
-
-      const responseText = await response.text();
-      if (!response.ok) {
-        return {
-          content: [{ type: "text" as const, text: `API request failed (${response.status}): ${responseText}` }],
-          isError: true,
-        };
-      }
-
-      return {
-        content: [{ type: "text" as const, text: `Update published successfully.\nStatus: ${response.status}\nResponse: ${responseText}` }],
-      };
-    } catch (error) {
-      return {
-        content: [{ type: "text" as const, text: `Error publishing update: ${error instanceof Error ? error.message : String(error)}` }],
-        isError: true,
-      };
-    }
   },
 );
 
 server.tool(
   "compose_and_publish",
-  "Write a work update from notes and publish it to the website in one step",
+  "Write a work update from notes, convert to HTML, and publish to the portal in one step",
   {
     date: z.string().describe("Date of the update (YYYY-MM-DD)"),
     recipient: z.string().optional().describe("Recipient name"),
@@ -177,57 +197,27 @@ server.tool(
     })).describe("List of tasks"),
     general_notes: z.string().optional().describe("Additional context"),
     closing: z.string().optional().describe("Custom closing message"),
-    title: z.string().optional().describe("Title for the published update"),
+    clientName: z.string().optional().describe("Client name for the portal entry"),
+    orderId: z.string().optional().describe("Order/project ID"),
+    profileId: z.string().optional().describe("Profile ID override"),
+    updateTo: z.string().optional().describe("Update type (defaults to INBOX_PAGE_UPDATE)"),
   },
   async (params) => {
     const formatted = formatUpdate(params);
+    const messageHtml = textToHtml(formatted);
 
-    if (!config.apiUrl) {
-      return {
-        content: [{ type: "text" as const, text: `Update written successfully but API_URL is not configured, so it wasn't published.\n\n---\n\n${formatted}` }],
-      };
-    }
+    const result = await publishToPortal({
+      message: messageHtml,
+      clientName: params.clientName,
+      orderId: params.orderId,
+      profileId: params.profileId,
+      updateTo: params.updateTo,
+    });
 
-    const now = new Date().toISOString();
-    const body = {
-      title: params.title || `Work Update — ${now.split("T")[0]}`,
-      content: formatted,
-      author: config.authorName || undefined,
-      createdAt: now,
+    return {
+      content: [{ type: "text" as const, text: `${result.ok ? "Published successfully." : "Publish failed."}\n\n---\n\n${formatted}` }],
+      isError: !result.ok,
     };
-
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      ...extraHeaders,
-    };
-    if (config.apiAuthHeader && config.apiAuthValue) {
-      headers[config.apiAuthHeader] = config.apiAuthValue;
-    }
-
-    try {
-      const response = await fetch(config.apiUrl, {
-        method: config.apiMethod,
-        headers,
-        body: JSON.stringify(body),
-      });
-
-      const responseText = await response.text();
-      if (!response.ok) {
-        return {
-          content: [{ type: "text" as const, text: `Written and formatted, but publish failed (${response.status}): ${responseText}\n\n---\n\n${formatted}` }],
-          isError: true,
-        };
-      }
-
-      return {
-        content: [{ type: "text" as const, text: `Update written and published successfully.\nStatus: ${response.status}\n\n---\n\n${formatted}` }],
-      };
-    } catch (error) {
-      return {
-        content: [{ type: "text" as const, text: `Written but publish error: ${error instanceof Error ? error.message : String(error)}\n\n---\n\n${formatted}` }],
-        isError: true,
-      };
-    }
   },
 );
 
