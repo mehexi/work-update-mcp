@@ -13,8 +13,16 @@ const config = {
   orderId: process.env.ORDER_ID || "",
   updateTo: process.env.UPDATE_TO || "INBOX_PAGE_UPDATE",
   authorName: process.env.AUTHOR_NAME || "",
-  authorRole: process.env.AUTHOR_ROLE || "",
 };
+
+const styleGuide =
+  "STYLE RULES - follow these exactly when writing:\n" +
+  "1. Opening: Warm greeting - 'I hope you're doing well and this message finds you in great spirits.'\n" +
+  "2. Each task: Issue -> Action Taken -> Result -> Fallback offer\n" +
+  "3. Tone: Warm, professional, reassuring, proactive, service-oriented. Never cold or robotic.\n" +
+  "4. Voice: First-person active - 'I fixed', 'I improved', 'I implemented'. Never passive voice.\n" +
+  "5. Client empowerment: After each fix, tell them what they can now do - 'You can now...'\n" +
+  "6. Closing: Acknowledge progress, invite more feedback, end with commitment. Sign off with 'Best regards'.";
 
 function textToHtml(text: string): string {
   const escaped = text
@@ -22,59 +30,65 @@ function textToHtml(text: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
-  const withBreaks = escaped.replace(/\n/g, "<br>");
-  return `<p>${withBreaks}</p>`;
+  return `<p>${escaped.replace(/\n/g, "<br>")}</p>`;
 }
 
 function formatUpdate(params: {
   date: string;
   recipient?: string;
   tasks: Array<{
-    summary: string;
-    problem?: string;
-    action?: string;
-    current_state?: string;
-    next_step?: string;
+    issue: string;
+    action: string;
+    result: string;
+    fallback_offer?: string;
   }>;
-  general_notes?: string;
-  closing?: string;
+  progress_note?: string;
+  extra_notes?: string;
+  custom_closing?: string;
 }): string {
   const recipient = params.recipient || "Client";
   const lines: string[] = [];
 
   const today = params.date || new Date().toISOString().split("T")[0];
 
-  lines.push(`Hi ${recipient},`);
+  lines.push("Subject: Work Update - " + today);
   lines.push("");
-  lines.push("Please find below a summary of the work completed and current status of ongoing tasks.");
+  lines.push("I hope you're doing well and this message finds you in great spirits.");
+  lines.push("");
+  lines.push("Here's a summary of what I've been working on:");
   lines.push("");
 
   for (const task of params.tasks) {
-    lines.push(`• ${task.summary}`);
-    if (task.problem) lines.push(`  - Problem: ${task.problem}`);
-    if (task.action) lines.push(`  - Action taken: ${task.action}`);
-    if (task.current_state) lines.push(`  - Current state: ${task.current_state}`);
-    if (task.next_step) lines.push(`  - Next step: ${task.next_step}`);
+    lines.push("- " + task.issue);
+    lines.push("  I " + task.action);
+    lines.push("  You can now " + task.result);
+    if (task.fallback_offer) {
+      lines.push("  If you still face difficulty, feel free to " + task.fallback_offer);
+    }
     lines.push("");
   }
 
-  if (params.general_notes) {
-    lines.push(`Additional notes: ${params.general_notes}`);
+  if (params.progress_note) {
+    lines.push(params.progress_note);
     lines.push("");
   }
 
-  if (params.closing) {
-    lines.push(params.closing);
+  if (params.extra_notes) {
+    lines.push(params.extra_notes);
+    lines.push("");
+  }
+
+  if (params.custom_closing) {
+    lines.push(params.custom_closing);
   } else {
-    lines.push("Please let me know if you'd like any adjustments or if there's anything else you'd like me to address.");
+    lines.push("I'm really happy to hear everything is looking solid on your end.");
+    lines.push("If you have any more concerns, ideas, or improvements, please don't hesitate to share them.");
+    lines.push("I'll be more than happy to take care of everything.");
   }
 
   lines.push("");
-  if (config.authorName) {
-    lines.push(`Best regards,`);
-    lines.push(config.authorName);
-    if (config.authorRole) lines.push(config.authorRole);
-  }
+  lines.push("Best regards,");
+  if (config.authorName) lines.push(config.authorName);
 
   return lines.join("\n");
 }
@@ -86,26 +100,25 @@ const server = new McpServer({
 
 server.tool(
   "write_update",
-  "Format work notes into a structured client update (problem → action → current state → next step)",
+  "Draft a client work update following the exact style rules. " +
+    "Returns the message for YOUR REVIEW - does NOT publish. After user approves, use publish_update.\n\n" + styleGuide,
   {
     date: z.string().describe("Date of the update (YYYY-MM-DD)"),
-    recipient: z.string().optional().describe("Recipient name (defaults to Client)"),
+    recipient: z.string().optional().describe("Client/recipient name"),
     tasks: z.array(z.object({
-      summary: z.string().describe("Short headline for this task"),
-      problem: z.string().optional().describe("What issue or requirement prompted the work"),
-      action: z.string().optional().describe("What was done to address it"),
-      current_state: z.string().optional().describe("Where things stand now"),
-      next_step: z.string().optional().describe("Suggested next action or decision needed"),
-    })).describe("List of tasks with structured details"),
-    general_notes: z.string().optional().describe("Any additional context or notes"),
-    closing: z.string().optional().describe("Custom closing message"),
-    as_html: z.boolean().optional().describe("Return as HTML instead of plain text"),
+      issue: z.string().describe("What the issue or requirement was"),
+      action: z.string().describe("What was done - starts after 'I', e.g. 'fixed the login token validation'"),
+      result: z.string().describe("What client can now do - starts after 'You can now', e.g. 'log in without SSO issues'"),
+      fallback_offer: z.string().optional().describe("Optional - starts after 'If you still face difficulty, feel free to'"),
+    })).describe("Each task: Issue -> Action -> Result -> Fallback"),
+    progress_note: z.string().optional().describe("A sentence acknowledging overall progress"),
+    extra_notes: z.string().optional().describe("Any additional context to include"),
+    custom_closing: z.string().optional().describe("Custom closing paragraph (default uses standard warm closing)"),
   },
   async (params) => {
     const formatted = formatUpdate(params);
-    const output = params.as_html ? textToHtml(formatted) : formatted;
     return {
-      content: [{ type: "text" as const, text: output }],
+      content: [{ type: "text" as const, text: formatted }],
     };
   },
 );
@@ -116,24 +129,21 @@ async function publishToPortal(params: {
   orderId?: string;
   profileId?: string;
   updateTo?: string;
-  attachments?: string;
-  commentFromOperation?: string;
-  commentFromSales?: string;
 }) {
   if (!config.nextAction) {
-    return { ok: false, text: "Error: NEXT_ACTION is not configured. Set it in the server env vars." };
+    return { ok: false, text: "NEXT_ACTION not configured. Set it in the server env vars." };
   }
   if (!config.cookies) {
-    return { ok: false, text: "Error: COOKIES is not configured. Set it in the server env vars." };
+    return { ok: false, text: "COOKIES not configured. Set them in the server env vars." };
   }
 
   const payload = [{
     profileId: params.profileId || config.profileId,
     clientName: params.clientName || config.clientName,
     orderId: params.orderId || config.orderId,
-    attachments: params.attachments || "$undefined",
-    commentFromOperation: params.commentFromOperation || "$undefined",
-    commentFromSales: params.commentFromSales || "$undefined",
+    attachments: "$undefined",
+    commentFromOperation: "$undefined",
+    commentFromSales: "$undefined",
     updateTo: params.updateTo || config.updateTo,
     message: params.message,
   }];
@@ -154,68 +164,38 @@ async function publishToPortal(params: {
 
     const responseText = await response.text();
     if (!response.ok) {
-      return { ok: false, text: `Portal request failed (${response.status}): ${responseText}` };
+      return { ok: false, text: "Portal request failed (" + response.status + "): " + responseText };
     }
 
-    return { ok: true, text: `Update published to portal.\nStatus: ${response.status}\nResponse: ${responseText}` };
+    return { ok: true, text: "Update published to portal.\nStatus: " + response.status + "\nResponse: " + responseText };
   } catch (error) {
-    return { ok: false, text: `Error publishing: ${error instanceof Error ? error.message : String(error)}` };
+    return { ok: false, text: "Error publishing: " + (error instanceof Error ? error.message : String(error)) };
   }
 }
 
 server.tool(
   "publish_update",
-  "Publish HTML content to the portal as a work update entry",
+  "Publish a pre-approved HTML message to the portal. " +
+    "ONLY use after the user has reviewed and explicitly approved the draft message. " +
+    "The tool auto-converts plain text to HTML if needed.",
   {
-    message: z.string().describe("HTML content for the update message body"),
+    message: z.string().describe("The update message content (plain text - auto-converted to HTML)"),
     clientName: z.string().optional().describe("Override client name"),
     orderId: z.string().optional().describe("Override order/project ID"),
     profileId: z.string().optional().describe("Override profile ID"),
     updateTo: z.string().optional().describe("Update type (defaults to INBOX_PAGE_UPDATE)"),
   },
   async (params) => {
-    const result = await publishToPortal(params);
-    return {
-      content: [{ type: "text" as const, text: result.text }],
-      isError: !result.ok,
-    };
-  },
-);
-
-server.tool(
-  "compose_and_publish",
-  "Write a work update from notes, convert to HTML, and publish to the portal in one step",
-  {
-    date: z.string().describe("Date of the update (YYYY-MM-DD)"),
-    recipient: z.string().optional().describe("Recipient name"),
-    tasks: z.array(z.object({
-      summary: z.string().describe("Short headline for this task"),
-      problem: z.string().optional().describe("What issue or requirement prompted the work"),
-      action: z.string().optional().describe("What was done to address it"),
-      current_state: z.string().optional().describe("Where things stand now"),
-      next_step: z.string().optional().describe("Suggested next action or decision needed"),
-    })).describe("List of tasks"),
-    general_notes: z.string().optional().describe("Additional context"),
-    closing: z.string().optional().describe("Custom closing message"),
-    clientName: z.string().optional().describe("Client name for the portal entry"),
-    orderId: z.string().optional().describe("Order/project ID"),
-    profileId: z.string().optional().describe("Profile ID override"),
-    updateTo: z.string().optional().describe("Update type (defaults to INBOX_PAGE_UPDATE)"),
-  },
-  async (params) => {
-    const formatted = formatUpdate(params);
-    const messageHtml = textToHtml(formatted);
-
+    const html = textToHtml(params.message);
     const result = await publishToPortal({
-      message: messageHtml,
+      message: html,
       clientName: params.clientName,
       orderId: params.orderId,
       profileId: params.profileId,
       updateTo: params.updateTo,
     });
-
     return {
-      content: [{ type: "text" as const, text: `${result.ok ? "Published successfully." : "Publish failed."}\n\n---\n\n${formatted}` }],
+      content: [{ type: "text" as const, text: result.text }],
       isError: !result.ok,
     };
   },
